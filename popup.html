@@ -557,6 +557,31 @@
     <p id="status" class="status"></p>
 
     <section class="block">
+      <button class="collapse" id="ignoreToggle" aria-expanded="false">
+        <span class="caret">▸</span> Ignored sites
+      </button>
+      <div id="ignoreWrap" hidden>
+        <p class="hint" style="margin-top: 10px">
+          Duplicates are never closed on these sites — handy for multi-account
+          sites (e.g. YouTube) where the same URL means different accounts.
+        </p>
+        <div class="new-session">
+          <input
+            id="ignoreInput"
+            class="input"
+            type="text"
+            placeholder="e.g. youtube.com"
+          />
+          <button id="ignoreAdd" class="btn btn-accent sm">Add</button>
+        </div>
+        <button id="ignoreAddCurrent" class="sbtn" style="margin-top: 8px">
+          Ignore current site
+        </button>
+        <div class="tablist" id="ignoreList" style="margin-top: 10px"></div>
+      </div>
+    </section>
+
+    <section class="block">
       <div class="block-head"><h2>Sessions</h2></div>
       <p class="hint">
         Click a session to open it. Drag tabs in, or between open sessions.

@@ -8,6 +8,7 @@
 // (lowest tab id / earliest opened) and close the newer copies.
 
 const AUTO_CLOSE_KEY = "autoClose";
+const EXCLUDE_KEY = "excludedDomains"; // sync: array of hostnames to never dedupe
 const LOG_KEY = "closeLog";
 const LOG_MAX = 200; // keep the most recent N closed-tab entries
 
@@ -50,10 +51,46 @@ function isCountable(tab) {
   return tab.url.startsWith("http://") || tab.url.startsWith("https://");
 }
 
+// --- Excluded sites (never de-duplicated) ---------------------------------
+// Some sites (e.g. multi-account sites like YouTube) show the same URL for
+// different logged-in accounts. Chrome can't tell those tabs apart, so the
+// user can list such domains here to exempt them from duplicate detection.
+
+function hostnameOf(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+// Normalize user input into a bare domain: drop scheme/path and leading "www.".
+function cleanDomain(input) {
+  let s = (input || "").trim().toLowerCase();
+  if (!s) return "";
+  try {
+    if (s.includes("://")) s = new URL(s).hostname;
+  } catch {
+    /* keep as typed */
+  }
+  return s.replace(/^www\./, "").replace(/\/.*$/, "");
+}
+
+async function getExcluded() {
+  const d = await chrome.storage.sync.get(EXCLUDE_KEY);
+  return Array.isArray(d[EXCLUDE_KEY]) ? d[EXCLUDE_KEY] : [];
+}
+
+// A host is excluded if it equals a listed domain or is a subdomain of one.
+function isExcludedHost(host, excluded) {
+  return excluded.some((d) => host === d || host.endsWith("." + d));
+}
+
 // Find duplicate tabs. Returns { duplicates: [tab,...], byUrl: Map }.
 // The FIRST tab seen for each URL (oldest id) is the keeper; the rest are dupes.
 async function findDuplicatesWithKeepers() {
   const tabs = await chrome.tabs.query({});
+  const excluded = await getExcluded();
   const countable = tabs
     .filter(isCountable)
     .sort((a, b) => a.id - b.id); // oldest first
@@ -61,6 +98,8 @@ async function findDuplicatesWithKeepers() {
   const keeperByKey = new Map(); // url key -> the tab we keep (oldest)
   const duplicates = [];
   for (const tab of countable) {
+    // Skip excluded sites entirely — never treat their tabs as duplicates.
+    if (isExcludedHost(hostnameOf(tab.url), excluded)) continue;
     const key = normalizeUrl(tab.url);
     if (keeperByKey.has(key)) duplicates.push(tab);
     else keeperByKey.set(key, tab);
@@ -562,6 +601,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     } else if (msg.type === "clearLog") {
       await chrome.storage.local.set({ [LOG_KEY]: [] });
       sendResponse({ ok: true });
+    } else if (msg.type === "getExcluded") {
+      sendResponse({ excluded: await getExcluded() });
+    } else if (msg.type === "addExcluded") {
+      const d = cleanDomain(msg.domain);
+      const list = await getExcluded();
+      if (d && !list.includes(d)) list.push(d);
+      await chrome.storage.sync.set({ [EXCLUDE_KEY]: list });
+      await updateBadge();
+      sendResponse({ ok: Boolean(d), excluded: list });
+    } else if (msg.type === "removeExcluded") {
+      const list = (await getExcluded()).filter((x) => x !== msg.domain);
+      await chrome.storage.sync.set({ [EXCLUDE_KEY]: list });
+      await updateBadge();
+      sendResponse({ ok: true, excluded: list });
     } else if (msg.type === "getSessions") {
       await pruneStaleGroups();
       const sessions = await getSessions();

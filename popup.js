@@ -8,6 +8,12 @@ const newNameEl = document.getElementById("newSessionName");
 const addSessionBtn = document.getElementById("addSession");
 const openTabsEl = document.getElementById("openTabs");
 const tabCountEl = document.getElementById("tabCount");
+const ignoreToggle = document.getElementById("ignoreToggle");
+const ignoreWrap = document.getElementById("ignoreWrap");
+const ignoreInput = document.getElementById("ignoreInput");
+const ignoreAdd = document.getElementById("ignoreAdd");
+const ignoreAddCurrent = document.getElementById("ignoreAddCurrent");
+const ignoreList = document.getElementById("ignoreList");
 const logToggle = document.getElementById("logToggle");
 const logWrap = document.getElementById("logWrap");
 const logEl = document.getElementById("log");
@@ -395,6 +401,72 @@ async function refreshOpenTabs() {
     openTabsEl.appendChild(row);
   }
 }
+
+// --- ignored sites (collapsible) ------------------------------------------
+
+ignoreToggle.addEventListener("click", () => {
+  const open = ignoreToggle.getAttribute("aria-expanded") === "true";
+  ignoreToggle.setAttribute("aria-expanded", String(!open));
+  ignoreWrap.hidden = open;
+  if (!open) refreshIgnored();
+});
+
+function renderIgnored(list) {
+  ignoreList.innerHTML = "";
+  if (!list || list.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "trow empty";
+    empty.textContent = "No ignored sites.";
+    ignoreList.appendChild(empty);
+    return;
+  }
+  for (const domain of list) {
+    const row = document.createElement("div");
+    row.className = "trow";
+    const label = document.createElement("span");
+    label.className = "tlabel";
+    label.textContent = domain;
+    const x = document.createElement("button");
+    x.className = "tx";
+    x.textContent = "✕";
+    x.title = "Stop ignoring";
+    x.addEventListener("click", async () => {
+      const { excluded } = await send({ type: "removeExcluded", domain });
+      renderIgnored(excluded);
+      await refreshCount();
+    });
+    row.append(label, x);
+    ignoreList.appendChild(row);
+  }
+}
+
+async function refreshIgnored() {
+  const { excluded } = await send({ type: "getExcluded" });
+  renderIgnored(excluded);
+}
+
+ignoreAdd.addEventListener("click", async () => {
+  const d = ignoreInput.value.trim();
+  if (!d) return;
+  const { excluded } = await send({ type: "addExcluded", domain: d });
+  ignoreInput.value = "";
+  renderIgnored(excluded);
+  await refreshCount();
+});
+ignoreInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") ignoreAdd.click();
+});
+ignoreAddCurrent.addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !isHttp(tab.url)) {
+    statusEl.textContent = "No web page to ignore.";
+    return;
+  }
+  const { excluded } = await send({ type: "addExcluded", domain: tab.url });
+  renderIgnored(excluded);
+  await refreshCount();
+  await refreshOpenTabs();
+});
 
 // --- recently closed (collapsible) ----------------------------------------
 
