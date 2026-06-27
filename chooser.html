@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfbfd;
+        --surface: #ffffff;
+        --surface-2: #f3f4f7;
+        --text: #1b1c1f;
+        --muted: #71757e;
+        --border: rgba(15, 17, 25, 0.08);
+        --border-strong: rgba(15, 17, 25, 0.16);
+        --accent: #6d5efc;
+        --accent-press: #5a4ce6;
+        --accent-soft: rgba(109, 94, 252, 0.12);
+        --success: #22c55e;
+        --radius: 13px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #131418;
+          --surface: #1c1e24;
+          --surface-2: #24262e;
+          --text: #eceef2;
+          --muted: #9a9fab;
+          --border: rgba(255, 255, 255, 0.08);
+          --border-strong: rgba(255, 255, 255, 0.16);
+          --accent: #8b7bff;
+          --accent-press: #7a69f5;
+          --accent-soft: rgba(139, 123, 255, 0.16);
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        margin: 0;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 13px;
+      }
+      h1 {
+        font-size: 13px;
+        font-weight: 650;
+        margin: 0 0 4px;
+      }
+      .tabinfo {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 10px 12px;
+        margin-bottom: 14px;
+      }
+      .tabinfo img {
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
+        flex: none;
+      }
+      .tabinfo .t {
+        min-width: 0;
+      }
+      .tabinfo .title {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .tabinfo .url {
+        color: var(--muted);
+        font-size: 11px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .label {
+        font-size: 11px;
+        font-weight: 650;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        margin: 0 0 8px;
+      }
+      .slist {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .schoice {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        text-align: left;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 11px 13px;
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--text);
+        cursor: pointer;
+        transition: border-color 0.12s ease, background 0.12s ease,
+          box-shadow 0.12s ease;
+      }
+      .schoice:hover {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+      .schoice .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--border-strong);
+        flex: none;
+      }
+      .schoice.active .dot {
+        background: var(--success);
+      }
+      .schoice.browse {
+        border-style: dashed;
+        color: var(--muted);
+        margin-top: 12px;
+      }
+      .schoice.browse:hover {
+        color: var(--text);
+      }
+      .schoice.browse .dot {
+        background: none;
+        width: auto;
+        height: auto;
+        font-size: 14px;
+        line-height: 1;
+      }
+      .schoice.browse small {
+        display: block;
+        font-weight: 500;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .schoice .name {
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .schoice .state {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+      .new-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .new-row input {
+        flex: 1;
+        font: inherit;
+        font-size: 12.5px;
+        padding: 9px 12px;
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--text);
+      }
+      .new-row input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+      .btn {
+        font: inherit;
+        font-size: 12.5px;
+        font-weight: 600;
+        padding: 9px 14px;
+        border-radius: var(--radius);
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+      }
+      .btn:hover {
+        background: var(--accent-press);
+      }
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 18px;
+      }
+      .link {
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        background: none;
+        border: none;
+        color: var(--muted);
+        cursor: pointer;
+        padding: 4px 0;
+      }
+      .link.skip {
+        color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>File this tab into a session</h1>
+    <div class="tabinfo">
+      <img id="favi" alt="" />
+      <div class="t">
+        <div class="title" id="title">…</div>
+        <div class="url" id="url"></div>
+      </div>
+    </div>
+
+    <p class="label">Choose a session</p>
+    <div class="slist" id="slist"></div>
+
+    <div class="new-row">
+      <input id="newName" type="text" placeholder="…or new session name" />
+      <button id="createBtn" class="btn">Create</button>
+    </div>
+
+    <button id="browse" class="schoice browse">
+      <span class="dot">🌐</span>
+      <span class="name"
+        >Just browsing<small>Leave this tab unsorted</small></span
+      >
+    </button>
+
+    <div class="footer">
+      <button id="dontAsk" class="link">Don't ask again</button>
+    </div>
+
+    <script src="chooser.js"></script>
+  </body>
+</html>

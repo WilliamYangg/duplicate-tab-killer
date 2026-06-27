@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Duplicate Tab Killer",
+  "version": "1.0.0",
+  "description": "Tab organizer: auto-close duplicate tabs and group the rest into sessions you can open, manage, and close in one click.",
+  "author": "William Yang",
+  "permissions": ["tabs", "storage", "tabGroups", "alarms", "notifications"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Duplicate Tab Killer"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
