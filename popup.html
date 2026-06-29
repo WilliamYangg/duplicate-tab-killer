@@ -261,6 +261,20 @@
       .session-head:hover {
         background: var(--surface-2);
       }
+      .session-head .grip {
+        flex: none;
+        cursor: grab;
+        color: var(--muted);
+        font-size: 13px;
+        opacity: 0.55;
+        letter-spacing: -2px;
+      }
+      .session-head .grip:hover {
+        opacity: 1;
+      }
+      .session.dragging {
+        opacity: 0.5;
+      }
       .cdot {
         width: 9px;
         height: 9px;

@@ -256,6 +256,21 @@ function renderSessionCard(s) {
 
   const head = document.createElement("div");
   head.className = "session-head";
+
+  // Drag handle to reorder sessions.
+  const grip = document.createElement("span");
+  grip.className = "grip";
+  grip.textContent = "⠿";
+  grip.title = "Drag to reorder";
+  grip.draggable = true;
+  grip.addEventListener("click", (e) => e.stopPropagation());
+  grip.addEventListener("dragstart", (e) => {
+    e.dataTransfer.setData("application/x-session-id", s.id);
+    e.dataTransfer.effectAllowed = "move";
+    card.classList.add("dragging");
+  });
+  grip.addEventListener("dragend", () => card.classList.remove("dragging"));
+
   const dot = document.createElement("span");
   dot.className = "cdot";
   const name = document.createElement("span");
@@ -268,7 +283,7 @@ function renderSessionCard(s) {
   const caret = document.createElement("span");
   caret.className = "caret";
   caret.textContent = "▸";
-  head.append(dot, name, count, caret);
+  head.append(grip, dot, name, count, caret);
 
   head.addEventListener("click", () => {
     if (expanded.has(s.id)) expanded.delete(s.id);
@@ -287,6 +302,12 @@ function renderSessionCard(s) {
   card.addEventListener("drop", async (e) => {
     e.preventDefault();
     card.classList.remove("drop");
+    // Reordering: another session card was dropped onto this one.
+    const draggedId = e.dataTransfer.getData("application/x-session-id");
+    if (draggedId) {
+      if (draggedId !== s.id) await reorderSessions(draggedId, s.id);
+      return;
+    }
     const tabId = Number(e.dataTransfer.getData("text/plain"));
     const key = e.dataTransfer.getData("application/x-session-key");
     let r;
@@ -302,6 +323,15 @@ function renderSessionCard(s) {
   });
 
   return card;
+}
+
+// Move the dragged session to just before the target session, then persist.
+async function reorderSessions(draggedId, targetId) {
+  const ids = sessionsCache.map((s) => s.id).filter((id) => id !== draggedId);
+  const idx = ids.indexOf(targetId);
+  ids.splice(idx < 0 ? ids.length : idx, 0, draggedId);
+  await send({ type: "setSessionOrder", order: ids });
+  await refreshAll();
 }
 
 async function refreshSessions() {

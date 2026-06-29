@@ -1,11 +1,15 @@
 // Duplicate Tab Killer — background service worker
 //
 // Responsibilities:
-//   - Keep a badge count of how many duplicate tabs currently exist.
-//   - Optionally auto-close duplicates the moment they appear (toggle in popup).
+//   - Badge count of duplicate tabs; optional auto-close of duplicates.
+//   - Sessions: group tabs into native Chrome tab groups, manage and close them.
+//   - Idle-tab reminders and an optional "which session?" prompt for new tabs.
 //
 // "Duplicate" = same normalized URL. When closing, we KEEP the oldest tab
 // (lowest tab id / earliest opened) and close the newer copies.
+//
+// All session/state writes go through serialize() (see below) to avoid the
+// lost-update races that overlapping tab events would otherwise cause.
 
 const AUTO_CLOSE_KEY = "autoClose";
 const EXCLUDE_KEY = "excludedDomains"; // sync: array of hostnames to never dedupe
@@ -15,6 +19,8 @@ const LOG_MAX = 200; // keep the most recent N closed-tab entries
 // Teaching sessions
 const SESSIONS_KEY = "sessions"; // sync: array of {id, name, urlKeys, endTime}
 const STATE_KEY = "sessionState"; // local: { [id]: {groupId, closeAt} }
+const MEMBER_KEY = "tabMembership"; // local: { [tabId]: {sessionId, key} }
+const endingTabs = new Set(); // tab ids we are closing on purpose (keep keys)
 
 // Idle-tab reminder
 const IDLE_HOURS = 3;
@@ -26,6 +32,24 @@ const IDLE_NOTICE_CAP = 5; // max notifications per hourly run
 const ASK_KEY = "askOnNewTab"; // sync: boolean
 const startedAt = Date.now(); // skip prompts for tabs restored at startup
 const pendingAsk = new Set(); // tab ids created this run, awaiting first load
+
+// --- Write serialization --------------------------------------------------
+// Sessions/state/membership live in chrome.storage and are mutated by many
+// overlapping events (rapid tab updates, group changes, popup messages). Each
+// does read-modify-write, so without ordering they clobber each other. Run all
+// such work through one queue so each operation completes before the next.
+// IMPORTANT: a task passed to serialize() must NEVER call serialize() itself
+// (it would wait on the queue it's running in → deadlock). Only wrap at the
+// outermost entry points (event listeners + the message dispatcher).
+let opChain = Promise.resolve();
+function serialize(fn) {
+  const run = opChain.then(fn, fn);
+  opChain = run.then(
+    () => {},
+    () => {}
+  );
+  return run;
+}
 
 // Normalize a URL so trivial differences don't hide a real duplicate.
 // - drop the hash fragment (e.g. #section)
@@ -155,6 +179,7 @@ async function closeDuplicates(reason = "manual") {
       focusTarget = keeperByKey.get(normalizeUrl(activeTab.url));
     }
 
+    duplicates.forEach((t) => endingTabs.add(t.id));
     await logClosed(duplicates, reason);
     await chrome.tabs.remove(duplicates.map((t) => t.id));
 
@@ -171,7 +196,7 @@ async function closeDuplicates(reason = "manual") {
   return duplicates.length;
 }
 
-// --- Teaching sessions ----------------------------------------------------
+// --- Sessions -------------------------------------------------------------
 //
 // A "session" is a saved set of URLs (any group of tabs you use together —
 // work, research, a class, etc.) plus an optional daily end time. Starting a
@@ -206,6 +231,13 @@ async function getState() {
 async function setState(state) {
   await chrome.storage.local.set({ [STATE_KEY]: state });
 }
+async function getMembers() {
+  const d = await chrome.storage.local.get(MEMBER_KEY);
+  return d[MEMBER_KEY] && typeof d[MEMBER_KEY] === "object" ? d[MEMBER_KEY] : {};
+}
+async function setMembers(m) {
+  await chrome.storage.local.set({ [MEMBER_KEY]: m });
+}
 
 // A URL belongs to at most one session. Remove the key everywhere, then add it
 // to the target — so dragging a tab between sessions moves it cleanly.
@@ -215,6 +247,49 @@ function reassignKey(sessions, targetId, key) {
   }
   const t = sessions.find((x) => x.id === targetId);
   if (t) t.urlKeys = [...(t.urlKeys || []), key];
+}
+
+// Chrome's tab-group colors — each session gets one by its position.
+const GROUP_COLORS = [
+  "blue",
+  "red",
+  "green",
+  "purple",
+  "cyan",
+  "orange",
+  "pink",
+  "yellow",
+];
+function colorForIndex(i) {
+  return GROUP_COLORS[((i % GROUP_COLORS.length) + GROUP_COLORS.length) % GROUP_COLORS.length];
+}
+
+// Add a tab to a session's group, creating (starting) the group if it isn't
+// live yet — so a session always shows as a Chrome tab group once it has a tab.
+async function attachTabToSession(sessions, s, tabId) {
+  const idx = sessions.findIndex((x) => x.id === s.id);
+  const state = await getState();
+  const existing = state[s.id]?.groupId;
+  if (existing != null) {
+    try {
+      await chrome.tabs.group({ groupId: existing, tabIds: [tabId] });
+      return;
+    } catch {
+      // Stale group id (group no longer exists) — fall through and recreate.
+      delete state[s.id];
+      await setState(state);
+    }
+  }
+  const groupId = await chrome.tabs.group({ tabIds: [tabId] });
+  await chrome.tabGroups.update(groupId, {
+    title: s.name,
+    color: colorForIndex(idx),
+  });
+  const fresh = await getState();
+  const closeAt = endTimeToTimestamp(s.endTime);
+  fresh[s.id] = { groupId, closeAt };
+  await setState(fresh);
+  if (closeAt) chrome.alarms.create(`session-${s.id}`, { when: closeAt });
 }
 
 // Compute the next timestamp for an "HH:MM" end time. If that time already
@@ -254,11 +329,14 @@ async function startSession(id) {
     }
   }
   if (tabIds.length === 0) {
-    return { ok: false, error: "No teaching tabs open to group." };
+    return { ok: false, error: "No open tabs to group for this session." };
   }
 
   const groupId = await chrome.tabs.group({ tabIds });
-  await chrome.tabGroups.update(groupId, { title: s.name, color: "blue" });
+  await chrome.tabGroups.update(groupId, {
+    title: s.name,
+    color: colorForIndex(sessions.findIndex((x) => x.id === id)),
+  });
 
   const state = await getState();
   const closeAt = endTimeToTimestamp(s.endTime);
@@ -284,10 +362,7 @@ async function addCurrentTab(id) {
   }
   reassignKey(sessions, id, matchKey(active.url));
   await saveSessions(sessions);
-  const state = await getState();
-  if (state[id]?.groupId != null) {
-    await chrome.tabs.group({ groupId: state[id].groupId, tabIds: [active.id] });
-  }
+  await attachTabToSession(sessions, s, active.id);
   return { ok: true, url: active.url };
 }
 
@@ -305,17 +380,10 @@ async function addTabToSession(id, tabId) {
   if (!isCountable(tab)) return { ok: false, error: "only http(s) tabs" };
   reassignKey(sessions, id, matchKey(tab.url));
   await saveSessions(sessions);
-  const state = await getState();
-  if (state[id]?.groupId != null) {
-    await chrome.tabs.group({ groupId: state[id].groupId, tabIds: [tabId] });
-  } else {
-    // Target session isn't live — pull the tab out of any other group so it
-    // doesn't linger in the session it came from.
-    try {
-      await chrome.tabs.ungroup(tabId);
-    } catch {
-      /* not grouped */
-    }
+  try {
+    await attachTabToSession(sessions, s, tabId);
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
   }
   return { ok: true };
 }
@@ -331,6 +399,7 @@ async function endSession(id, reason = "session") {
   try {
     const tabs = await chrome.tabs.query({ groupId: entry.groupId });
     if (tabs.length) {
+      tabs.forEach((t) => endingTabs.add(t.id)); // ending a session keeps keys
       await logClosed(tabs, reason);
       await chrome.tabs.remove(tabs.map((t) => t.id));
       closed = tabs.length;
@@ -392,9 +461,45 @@ async function captureGroupedTab(tab) {
   const sessions = await getSessions();
   const owner = sessions.find((s) => state[s.id]?.groupId === tab.groupId);
   if (owner) {
-    reassignKey(sessions, owner.id, matchKey(tab.url));
+    const key = matchKey(tab.url);
+    reassignKey(sessions, owner.id, key);
     await saveSessions(sessions);
+    // Remember which session this tab belongs to, so closing it can forget it.
+    const members = await getMembers();
+    members[tab.id] = { sessionId: owner.id, key };
+    await setMembers(members);
   }
+}
+
+// When a tab that belongs to a live session navigates (you click around within
+// it), update the session's saved URL to follow the tab — so membership tracks
+// the tab, not the page it started on.
+async function syncMemberKey(tab) {
+  if (!isCountable(tab) || tab.groupId == null || tab.groupId < 0) return;
+  const state = await getState();
+  const sessions = await getSessions();
+  const owner = sessions.find((s) => state[s.id]?.groupId === tab.groupId);
+  if (!owner) return;
+
+  const newKey = matchKey(tab.url);
+  const members = await getMembers();
+  const prev = members[tab.id];
+  const oldKey = prev && prev.sessionId === owner.id ? prev.key : null;
+
+  // Nothing to do if the tab's key hasn't effectively changed.
+  if (oldKey === newKey && (owner.urlKeys || []).includes(newKey)) return;
+
+  // Drop the URL it navigated away from, then assign the new one to this session.
+  if (oldKey) {
+    for (const s of sessions) {
+      s.urlKeys = (s.urlKeys || []).filter((k) => k !== oldKey);
+    }
+  }
+  reassignKey(sessions, owner.id, newKey);
+  await saveSessions(sessions);
+
+  members[tab.id] = { sessionId: owner.id, key: newKey };
+  await setMembers(members);
 }
 
 // If a group is dissolved (e.g. user closed all its tabs manually), forget it.
@@ -424,6 +529,17 @@ async function isAssigned(tab) {
   const key = matchKey(tab.url);
   const sessions = await getSessions();
   return sessions.some((s) => (s.urlKeys || []).includes(key));
+}
+
+// A new tab must stay open this long before we ask about it — gives transient
+// tabs time to be closed/redirected first.
+const ASK_DELAY_MS = 30000;
+
+// Schedule the "which session?" prompt for 30s from now (via an alarm, so it
+// survives the service worker sleeping). Re-checked at fire time.
+async function scheduleAsk(tabId) {
+  if (!(await getAskOnNewTab())) return;
+  chrome.alarms.create(`ask-${tabId}`, { when: Date.now() + ASK_DELAY_MS });
 }
 
 // Pop a small chooser window asking which session a freshly-opened tab belongs
@@ -520,28 +636,58 @@ chrome.tabs.onUpdated.addListener((id, changeInfo, tab) => {
   // Only react when the URL settles, to avoid thrashing mid-navigation.
   if (changeInfo.url || changeInfo.status === "complete") {
     onTabChanged();
-    autoGroup(tab);
+    serialize(() => autoGroup(tab));
   }
+  // A grouped tab navigated → keep its session's saved URL in sync with it.
+  if (changeInfo.url) serialize(() => syncMemberKey(tab));
   // Fires when a tab is dragged into/out of a group in the tab strip.
-  if (changeInfo.groupId !== undefined) captureGroupedTab(tab);
+  if (changeInfo.groupId !== undefined) serialize(() => captureGroupedTab(tab));
   // A newly-opened tab stays "pending" until it lands on a real http(s) page
   // (a fresh tab loads chrome://newtab first — we wait past that for the URL
   // the user actually navigates to), then we ask which session it belongs to.
   if (changeInfo.status === "complete" && pendingAsk.has(id) && isCountable(tab)) {
     pendingAsk.delete(id);
-    maybeAskForTab(tab);
+    scheduleAsk(id); // ask only after it's been open ~30s
   }
 });
 chrome.tabs.onCreated.addListener((tab) => {
   onTabChanged();
   pendingAsk.add(tab.id); // candidate; we decide once it loads a real page
 });
-chrome.tabs.onRemoved.addListener((tabId) => pendingAsk.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  pendingAsk.delete(tabId);
+  chrome.alarms.clear(`ask-${tabId}`); // closed before the 30s prompt
+});
 chrome.tabs.onRemoved.addListener(updateBadge);
+
+// When a tab is closed, if it belonged to a session, forget it — UNLESS we
+// closed it on purpose (End now / auto-close / dedupe), which keeps the saved
+// tabs so the session can be restarted.
+chrome.tabs.onRemoved.addListener((tabId) =>
+  serialize(async () => {
+    const members = await getMembers();
+    const m = members[tabId];
+    if (m) {
+      delete members[tabId];
+      await setMembers(members);
+      if (!endingTabs.has(tabId)) {
+        const sessions = await getSessions();
+        const s = sessions.find((x) => x.id === m.sessionId);
+        if (s) {
+          s.urlKeys = (s.urlKeys || []).filter((k) => k !== m.key);
+          await saveSessions(sessions);
+        }
+      }
+    }
+    endingTabs.delete(tabId);
+  })
+);
 chrome.runtime.onStartup.addListener(updateBadge);
 
 // Tab groups: clean up state when a group is dissolved.
-chrome.tabGroups.onRemoved.addListener((group) => forgetGroup(group.id));
+chrome.tabGroups.onRemoved.addListener((group) =>
+  serialize(() => forgetGroup(group.id))
+);
 
 // Alarms: hourly idle check + per-session auto-close timers.
 function ensureIdleAlarm() {
@@ -557,7 +703,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "idleCheck") {
     runIdleCheck();
   } else if (alarm.name.startsWith("session-")) {
-    endSession(alarm.name.slice("session-".length), "session");
+    serialize(() => endSession(alarm.name.slice("session-".length), "session"));
+  } else if (alarm.name.startsWith("ask-")) {
+    const tabId = Number(alarm.name.slice("ask-".length));
+    chrome.alarms.clear(alarm.name);
+    // Tab still open after 30s? Re-check and maybe ask. (maybeAskForTab
+    // re-verifies it's unassigned, the toggle is on, and sessions exist.)
+    chrome.tabs.get(tabId).then(maybeAskForTab).catch(() => {});
   }
 });
 
@@ -588,7 +740,8 @@ chrome.notifications.onClicked.addListener((id) => {
 
 // Messages from the popup.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  (async () => {
+  serialize(async () => {
+   try {
     if (msg.type === "closeDuplicates") {
       const closed = await closeDuplicates("manual");
       sendResponse({ closed });
@@ -619,12 +772,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       await pruneStaleGroups();
       const sessions = await getSessions();
       const state = await getState();
-      // Annotate with live status + the actual tabs in each live group.
+      let stateChanged = false;
+      // Annotate with live status + the actual tabs in each live group. A
+      // session is only "active" if its group actually has tabs right now.
       const view = await Promise.all(
         sessions.map(async (s) => {
-          const active = state[s.id]?.groupId != null;
           let tabs = [];
-          if (active) {
+          if (state[s.id]?.groupId != null) {
             try {
               tabs = (
                 await chrome.tabs.query({ groupId: state[s.id].groupId })
@@ -638,6 +792,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               /* group vanished */
             }
           }
+          const active = tabs.length > 0;
+          // State says live but there are no tabs → it's not really active;
+          // clean it up so the green dot stays honest.
+          if (state[s.id]?.groupId != null && !active) {
+            delete state[s.id];
+            chrome.alarms.clear(`session-${s.id}`);
+            stateChanged = true;
+          }
           return {
             ...s,
             active,
@@ -646,6 +808,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           };
         })
       );
+      if (stateChanged) await setState(state);
       sendResponse({ sessions: view });
     } else if (msg.type === "createSession") {
       const sessions = await getSessions();
@@ -667,6 +830,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await saveSessions(sessions);
       }
       sendResponse({ ok: Boolean(s) });
+    } else if (msg.type === "setSessionOrder") {
+      const sessions = await getSessions();
+      const order = Array.isArray(msg.order) ? msg.order : [];
+      const byId = new Map(sessions.map((s) => [s.id, s]));
+      const reordered = [];
+      for (const id of order) {
+        if (byId.has(id)) {
+          reordered.push(byId.get(id));
+          byId.delete(id);
+        }
+      }
+      for (const s of byId.values()) reordered.push(s); // anything not listed
+      await saveSessions(reordered);
+      sendResponse({ ok: true });
     } else if (msg.type === "deleteSession") {
       await endSession(msg.id, "session");
       const sessions = (await getSessions()).filter((x) => x.id !== msg.id);
@@ -692,6 +869,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (typeof msg.tabId === "number") {
         try {
           const tab = await chrome.tabs.get(msg.tabId);
+          endingTabs.add(msg.tabId); // we forget the key explicitly below
           await logClosed([tab], "manual");
           await chrome.tabs.remove(msg.tabId);
         } catch {
@@ -709,6 +887,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       await updateBadge();
       sendResponse({ ok: true });
     }
-  })();
+   } catch (e) {
+     console.warn("[DuplicateTabKiller] message error:", e);
+     try {
+       sendResponse({ ok: false, error: String(e?.message || e) });
+     } catch (_) {
+       /* channel already closed */
+     }
+   }
+  });
   return true; // keep the message channel open for the async response
 });

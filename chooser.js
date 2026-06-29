@@ -15,8 +15,28 @@ function send(msg) {
 }
 
 async function assignTo(id) {
-  await send({ type: "addTabToSession", id, tabId });
-  window.close();
+  try {
+    const r = await send({ type: "addTabToSession", id, tabId });
+    if (r && r.ok) {
+      window.close();
+    } else {
+      showError((r && r.error) || "Couldn't add the tab to that session.");
+    }
+  } catch (e) {
+    showError(String((e && e.message) || e));
+  }
+}
+
+function showError(msg) {
+  let el = document.getElementById("chooserError");
+  if (!el) {
+    el = document.createElement("p");
+    el.id = "chooserError";
+    el.style.cssText =
+      "color:#ef4444;font-size:12px;margin:12px 0 0;font-weight:600;";
+    document.body.appendChild(el);
+  }
+  el.textContent = "⚠ " + msg;
 }
 
 function renderSessions(sessions) {
