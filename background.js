@@ -843,7 +843,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ sessions: view });
     } else if (msg.type === "createSession") {
       const sessions = await getSessions();
-      const id = `s${Date.now()}${Math.floor(performance.now())}`;
+      // Random suffix so two sessions created in the same millisecond can't
+      // collide (a duplicate id would silently drop a session on reorder).
+      const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
       sessions.push({
         id,
         name: msg.name || "Session",
