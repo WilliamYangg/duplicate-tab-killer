@@ -239,6 +239,15 @@ async function setMembers(m) {
   await chrome.storage.local.set({ [MEMBER_KEY]: m });
 }
 
+// Tab groups only work in normal browser windows — not popups or app windows.
+async function isNormalWindow(windowId) {
+  try {
+    return (await chrome.windows.get(windowId)).type === "normal";
+  } catch {
+    return false;
+  }
+}
+
 // A URL belongs to at most one session. Remove the key everywhere, then add it
 // to the target — so dragging a tab between sessions moves it cleanly.
 function reassignKey(sessions, targetId, key) {
@@ -267,6 +276,11 @@ function colorForIndex(i) {
 // Add a tab to a session's group, creating (starting) the group if it isn't
 // live yet — so a session always shows as a Chrome tab group once it has a tab.
 async function attachTabToSession(sessions, s, tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) throw new Error("tab gone");
+  if (!(await isNormalWindow(tab.windowId))) {
+    throw new Error("This tab's window can't hold groups.");
+  }
   const idx = sessions.findIndex((x) => x.id === s.id);
   const state = await getState();
   const existing = state[s.id]?.groupId;
@@ -311,7 +325,11 @@ async function startSession(id) {
   if (!s) return { ok: false, error: "not found" };
 
   const keys = new Set(s.urlKeys || []);
-  const tabs = (await chrome.tabs.query({})).filter(isCountable);
+  // Only tabs in normal windows can be grouped.
+  const tabs = [];
+  for (const t of (await chrome.tabs.query({})).filter(isCountable)) {
+    if (await isNormalWindow(t.windowId)) tabs.push(t);
+  }
   let tabIds = tabs.filter((t) => keys.has(matchKey(t.url))).map((t) => t.id);
 
   if (tabIds.length === 0) {
@@ -319,7 +337,7 @@ async function startSession(id) {
       active: true,
       currentWindow: true,
     });
-    if (active && isCountable(active)) {
+    if (active && isCountable(active) && (await isNormalWindow(active.windowId))) {
       tabIds = [active.id];
       const k = matchKey(active.url);
       if (!keys.has(k)) {
@@ -332,11 +350,16 @@ async function startSession(id) {
     return { ok: false, error: "No open tabs to group for this session." };
   }
 
-  const groupId = await chrome.tabs.group({ tabIds });
-  await chrome.tabGroups.update(groupId, {
-    title: s.name,
-    color: colorForIndex(sessions.findIndex((x) => x.id === id)),
-  });
+  let groupId;
+  try {
+    groupId = await chrome.tabs.group({ tabIds });
+    await chrome.tabGroups.update(groupId, {
+      title: s.name,
+      color: colorForIndex(sessions.findIndex((x) => x.id === id)),
+    });
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
 
   const state = await getState();
   const closeAt = endTimeToTimestamp(s.endTime);
@@ -362,7 +385,11 @@ async function addCurrentTab(id) {
   }
   reassignKey(sessions, id, matchKey(active.url));
   await saveSessions(sessions);
-  await attachTabToSession(sessions, s, active.id);
+  try {
+    await attachTabToSession(sessions, s, active.id);
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
   return { ok: true, url: active.url };
 }
 
@@ -444,6 +471,7 @@ async function autoGroup(tab) {
     const entry = state[s.id];
     if (entry?.groupId == null) continue;
     if ((s.urlKeys || []).includes(key) && tab.groupId !== entry.groupId) {
+      if (!(await isNormalWindow(tab.windowId))) continue;
       try {
         await chrome.tabs.group({ groupId: entry.groupId, tabIds: [tab.id] });
       } catch (e) {
@@ -635,13 +663,14 @@ async function onTabChanged() {
 chrome.tabs.onUpdated.addListener((id, changeInfo, tab) => {
   // Only react when the URL settles, to avoid thrashing mid-navigation.
   if (changeInfo.url || changeInfo.status === "complete") {
-    onTabChanged();
-    serialize(() => autoGroup(tab));
+    onTabChanged().catch(() => {});
+    serialize(() => autoGroup(tab)).catch(() => {});
   }
   // A grouped tab navigated → keep its session's saved URL in sync with it.
-  if (changeInfo.url) serialize(() => syncMemberKey(tab));
+  if (changeInfo.url) serialize(() => syncMemberKey(tab)).catch(() => {});
   // Fires when a tab is dragged into/out of a group in the tab strip.
-  if (changeInfo.groupId !== undefined) serialize(() => captureGroupedTab(tab));
+  if (changeInfo.groupId !== undefined)
+    serialize(() => captureGroupedTab(tab)).catch(() => {});
   // A newly-opened tab stays "pending" until it lands on a real http(s) page
   // (a fresh tab loads chrome://newtab first — we wait past that for the URL
   // the user actually navigates to), then we ask which session it belongs to.
@@ -651,7 +680,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo, tab) => {
   }
 });
 chrome.tabs.onCreated.addListener((tab) => {
-  onTabChanged();
+  onTabChanged().catch(() => {});
   pendingAsk.add(tab.id); // candidate; we decide once it loads a real page
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -680,13 +709,13 @@ chrome.tabs.onRemoved.addListener((tabId) =>
       }
     }
     endingTabs.delete(tabId);
-  })
+  }).catch(() => {})
 );
 chrome.runtime.onStartup.addListener(updateBadge);
 
 // Tab groups: clean up state when a group is dissolved.
 chrome.tabGroups.onRemoved.addListener((group) =>
-  serialize(() => forgetGroup(group.id))
+  serialize(() => forgetGroup(group.id)).catch(() => {})
 );
 
 // Alarms: hourly idle check + per-session auto-close timers.
@@ -703,7 +732,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "idleCheck") {
     runIdleCheck();
   } else if (alarm.name.startsWith("session-")) {
-    serialize(() => endSession(alarm.name.slice("session-".length), "session"));
+    serialize(() => endSession(alarm.name.slice("session-".length), "session")).catch(
+      () => {}
+    );
   } else if (alarm.name.startsWith("ask-")) {
     const tabId = Number(alarm.name.slice("ask-".length));
     chrome.alarms.clear(alarm.name);
@@ -895,6 +926,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
        /* channel already closed */
      }
    }
-  });
+  }).catch(() => {});
   return true; // keep the message channel open for the async response
 });
